@@ -478,11 +478,48 @@ internal sealed class LinuxComputerRunPlatform : ExternalCommandPlatform, ICompu
 
     private IReadOnlyList<WindowInfo> ListWindowsWithWdotool(int limit)
     {
-        var rows = RunRequired("wdotool", ["search", "--name", ".", "--regex"]).StandardOutputText
+        var searchResult = CommandRunner.Run("wdotool", ["search", "--name", ".", "--regex"]);
+        if (searchResult.ExitCode == 1
+            && string.IsNullOrWhiteSpace(searchResult.StandardOutputText)
+            && !searchResult.StandardError.Contains("Error:", StringComparison.OrdinalIgnoreCase))
+        {
+            // wdotool uses exit code 1 when a search succeeds but finds no windows.
+            // Keep backend/connection errors actionable instead of treating every
+            // empty result as a healthy empty desktop.
+            return [];
+        }
+
+        if (searchResult.ExitCode != 0)
+        {
+            var stderr = searchResult.StandardError.Trim();
+            var stdout = searchResult.StandardOutputText.Trim();
+            var detail = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+            if (string.IsNullOrWhiteSpace(detail))
+            {
+                detail = $"exit code {searchResult.ExitCode}";
+            }
+
+            throw new InvalidOperationException($"wdotool failed: {detail}");
+        }
+
+        var rows = searchResult.StandardOutputText
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Take(limit)
             .ToArray();
         var windows = new List<WindowInfo>(rows.Length);
+        var activeWindowResult = CommandRunner.Run("wdotool", ["getactivewindow"]);
+        long? activeWindowHandle = null;
+        if (activeWindowResult.ExitCode == 0)
+        {
+            foreach (var activeWindowId in activeWindowResult.StandardOutputText
+                         .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (TryParseWdotoolWindowHandle(activeWindowId, out var parsedHandle))
+                {
+                    activeWindowHandle = parsedHandle;
+                }
+            }
+        }
 
         foreach (var row in rows)
         {
@@ -513,7 +550,12 @@ internal sealed class LinuxComputerRunPlatform : ExternalCommandPlatform, ICompu
                     _wdotoolWindowIds[handle] = id;
                 }
 
-                windows.Add(new WindowInfo(handle, pid, TryReadProcessName(pid), title));
+                windows.Add(new WindowInfo(
+                    handle,
+                    pid,
+                    TryReadProcessName(pid),
+                    title,
+                    IsForeground: activeWindowHandle.HasValue ? handle == activeWindowHandle.Value : null));
             }
         }
 

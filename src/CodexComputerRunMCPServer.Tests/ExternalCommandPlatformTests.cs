@@ -311,6 +311,62 @@ public class ExternalCommandPlatformTests
     }
 
     [Test]
+    public async Task LinuxWaylandPlatform_ReportsForegroundWindowFromWdotoolActiveWindow()
+    {
+        const string firstWindowId = "zwlr_foreign_toplevel_handle_v1@4278190081";
+        const string activeWindowId = "zwlr_foreign_toplevel_handle_v1@4278190082";
+        var runner = new RecordingCommandRunner("wdotool")
+        {
+            OnRun = invocation => invocation.ArgumentText switch
+            {
+                "search --name . --regex" => RecordingCommandRunner.Text($"{firstWindowId}\tTerminal A\n{activeWindowId}\tTerminal B\n"),
+                "getactivewindow" => RecordingCommandRunner.Text($"{activeWindowId}\n"),
+                $"getwindowname {firstWindowId}" => RecordingCommandRunner.Text("Terminal A\n"),
+                $"getwindowname {activeWindowId}" => RecordingCommandRunner.Text("Terminal B\n"),
+                _ => RecordingCommandRunner.Result(1, string.Empty, "pid not available"),
+            },
+        };
+        var platform = new LinuxComputerRunPlatform(runner, waylandSession: true);
+
+        var windows = platform.ListWindows(5);
+
+        await Assert.That(windows.Count).IsEqualTo(2);
+        await Assert.That(windows[0].IsForeground).IsFalse();
+        await Assert.That(windows[1].IsForeground).IsTrue();
+    }
+
+    [Test]
+    public async Task LinuxWaylandPlatform_ReturnsEmptyWindowListWhenWdotoolSearchFindsNoWindows()
+    {
+        var runner = new RecordingCommandRunner("wdotool")
+        {
+            OnRun = invocation => invocation.ArgumentText == "search --name . --regex"
+                ? RecordingCommandRunner.Result(1, string.Empty, "INFO trying backend\nWARN backend unavailable, trying next")
+                : RecordingCommandRunner.Text(string.Empty),
+        };
+        var platform = new LinuxComputerRunPlatform(runner, waylandSession: true);
+
+        var windows = platform.ListWindows(5);
+
+        await Assert.That(windows.Count).IsEqualTo(0);
+        await Assert.That(runner.Invocations.Count).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task LinuxWaylandPlatform_StillReportsWdotoolBackendFailures()
+    {
+        var runner = new RecordingCommandRunner("wdotool")
+        {
+            OnRun = _ => RecordingCommandRunner.Result(1, string.Empty, "Error: backend 'wlr-protocols' failed: no Wayland compositor"),
+        };
+        var platform = new LinuxComputerRunPlatform(runner, waylandSession: true);
+
+        await Assert.That(() => platform.ListWindows(5))
+            .Throws<InvalidOperationException>()
+            .WithMessageContaining("no Wayland compositor");
+    }
+
+    [Test]
     public async Task LinuxWaylandPlatform_DerivesVirtualBoundsFromScreenshot()
     {
         var runner = new RecordingCommandRunner("grim")
